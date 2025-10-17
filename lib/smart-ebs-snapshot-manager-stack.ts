@@ -56,7 +56,7 @@ export class SmartEbsSnapshotManagerStack extends cdk.Stack {
     // ✅ 스냅샷 생성
     const createSnapshotFn = new lambda.Function(this, "CreateSnapshotFn", {
       ...commonLambdaProps,
-      handler: "api.create_snapshot.handler",
+      handler: "api.create_snapshot.lambda_handler",
     });
 
     // ✅ 스냅샷 삭제
