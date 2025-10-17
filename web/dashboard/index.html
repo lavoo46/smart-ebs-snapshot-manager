@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>SmartEBS Snapshot Dashboard & Manager</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h2>SmartEBS Snapshot Dashboard</h2>
+    <p>API를 통해 DynamoDB 데이터를 조회하고 스냅샷/정책을 관리합니다.</p>
+    <div class="controls">
+      <button id="reloadBtn">🔄 새로고침</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- 통계 -->
+    <section class="stats">
+      <div class="stat-card">총 스냅샷: <span id="totalSnapshots">0</span></div>
+      <div class="stat-card">진행 중: <span id="inProgress">0</span></div>
+      <div class="stat-card">완료됨: <span id="completed">0</span></div>
+      <div class="stat-card">오류: <span id="failed">0</span></div>
+    </section>
+
+    <!-- 레이아웃: 왼쪽(관리), 오른쪽(표) -->
+    <section class="layout">
+      <!-- 관리 패널 -->
+      <aside class="panel">
+        <h3>⚙️ 스냅샷 관리</h3>
+        <form id="createSnapshotForm" class="form-card">
+          <h4>📸 스냅샷 생성</h4>
+          <label>Volume ID
+            <input type="text" name="volumeId" placeholder="vol-xxxxxxxxxxxxxxxxx" required />
+          </label>
+          <button type="submit">생성</button>
+          <small class="hint">예: <code>vol-0340427802c1b5537</code></small>
+        </form>
+
+        <form id="deleteSnapshotForm" class="form-card">
+          <h4>🗑️ 스냅샷 삭제</h4>
+          <label>Snapshot ID
+            <input type="text" name="snapshotId" placeholder="snap-xxxxxxxxxxxxxxxxx" required />
+          </label>
+          <button type="submit" class="danger">삭제</button>
+        </form>
+
+        <h3>📋 정책 관리</h3>
+        <form id="createPolicyForm" class="form-card">
+          <h4>➕ 정책 추가</h4>
+          <label>Policy Name
+            <input type="text" name="name" placeholder="DailyBackup" required />
+          </label>
+          <label>Retention Days
+            <input type="number" name="retentionDays" min="1" step="1" placeholder="7" required />
+          </label>
+          <button type="submit">추가</button>
+        </form>
+
+        <form id="updatePolicyForm" class="form-card">
+          <h4>✏️ 정책 수정</h4>
+          <label>Policy ID
+            <input type="text" name="policy_id" placeholder="policy-xxxxxxxx" required />
+          </label>
+          <label>Policy Name (옵션)
+            <input type="text" name="name" placeholder="변경할 이름 (선택)" />
+          </label>
+          <label>Retention Days (옵션)
+            <input type="number" name="retentionDays" min="1" step="1" placeholder="예: 14" />
+          </label>
+          <button type="submit">수정</button>
+        </form>
+
+        <div id="toast" class="toast" hidden></div>
+      </aside>
+
+      <!-- 데이터 표 -->
+      <section class="tables">
+        <div class="table-card">
+          <h3>📸 Snapshots</h3>
+          <div class="table-controls">
+            <input type="text" id="filterInput" placeholder="Filter by snapshotId / volumeId" />
+            <button id="reloadSnapshots">Reload</button>
+          </div>
+          <table id="snapshotsTable">
+            <thead>
+              <tr>
+                <th>snapshotId</th>
+                <th>volumeId</th>
+                <th>status</th>
+                <th>createdAt</th>
+                <th>region</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="table-card">
+          <h3>📜 Policies</h3>
+          <table id="policiesTable">
+            <thead>
+              <tr>
+                <th>policy_id</th>
+                <th>name</th>
+                <th>retentionDays</th>
+                <th>createdAt</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <footer>
+    자동 새로고침 주기: 5분 | SmartEBS Snapshot Manager © 2025
+  </footer>
+
+  <script>
+    // 🔗 여기만 실제 API Gateway URL로 바꿔주세요
+    const API_BASE = "https://8znjachaob.execute-api.ap-northeast-2.amazonaws.com/prod";
+
+
+    // ==== 공통 ====
+    function showToast(msg, type = "info") {
+      const el = document.getElementById("toast");
+      el.textContent = msg;
+      el.className = `toast ${type}`;
+      el.hidden = false;
+      setTimeout(() => (el.hidden = true), 3000);
+    }
+
+    async function jsonFetch(url, options = {}) {
+      const resp = await fetch(url, {
+        headers: { "Content-Type": "application/json" },
+        ...options,
+      });
+      const text = await resp.text();
+      try {
+        return { ok: resp.ok, status: resp.status, data: text ? JSON.parse(text) : {} };
+      } catch {
+        return { ok: resp.ok, status: resp.status, data: text };
+      }
+    }
+
+    // ==== 조회 ====
+    async function fetchSnapshots() {
+      try {
+        const { ok, data } = await jsonFetch(`${API_BASE}/list/snapshots`);
+        const items = (data && (data.items || data.snapshots)) || [];
+        renderSnapshots(items);
+        updateStats(items);
+      } catch (e) {
+        console.error("❌ Snapshot 로드 실패:", e);
+        showToast("스냅샷 목록을 불러오지 못했습니다.", "error");
+      }
+    }
+
+    async function fetchPolicies() {
+      try {
+        const { ok, data } = await jsonFetch(`${API_BASE}/list/policies`);
+        const items = (data && (data.items || data.policies)) || [];
+        renderPolicies(items);
+      } catch (e) {
+        console.error("❌ Policy 로드 실패:", e);
+        showToast("정책 목록을 불러오지 못했습니다.", "error");
+      }
+    }
+
+    function renderSnapshots(snapshots) {
+      const tbody = document.querySelector("#snapshotsTable tbody");
+      tbody.innerHTML = "";
+      if (!snapshots.length) {
+        tbody.innerHTML = "<tr><td colspan='5'>스냅샷 데이터가 없습니다.</td></tr>";
+        return;
+      }
+
+      const keyword = (document.getElementById("filterInput").value || "").trim().toLowerCase();
+      snapshots
+        .filter(s => {
+          if (!keyword) return true;
+          const hay = `${s.snapshotId ?? ""} ${s.volumeId ?? ""}`.toLowerCase();
+          return hay.includes(keyword);
+        })
+        .forEach(s => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${s.snapshotId ?? "-"}</td>
+            <td>${s.volumeId ?? "-"}</td>
+            <td class="${(s.status || "").toLowerCase()}">${s.status ?? "-"}</td>
+            <td>${s.createdAt ?? s.lastSyncedAt ?? "-"}</td>
+            <td>${s.region ?? "-"}</td>
+          `;
+          tbody.appendChild(tr);
+        });
+    }
+
+    function renderPolicies(policies) {
+      const tbody = document.querySelector("#policiesTable tbody");
+      tbody.innerHTML = "";
+      if (!policies.length) {
+        tbody.innerHTML = "<tr><td colspan='4'>정책 데이터가 없습니다.</td></tr>";
+        return;
+      }
+      policies.forEach(p => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${p.policy_id ?? "-"}</td>
+          <td>${p.name ?? "-"}</td>
+          <td>${p.retentionDays ?? "-"}</td>
+          <td>${p.createdAt ?? "-"}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function updateStats(snapshots) {
+      const total = snapshots.length;
+      const inProgress = snapshots.filter(s => s.status === "creating").length;
+      const completed = snapshots.filter(s => s.status === "completed").length;
+      const failed = snapshots.filter(s => s.status === "error").length;
+
+      document.getElementById("totalSnapshots").textContent = total;
+      document.getElementById("inProgress").textContent = inProgress;
+      document.getElementById("completed").textContent = completed;
+      document.getElementById("failed").textContent = failed;
+    }
+
+    // ==== 관리: 스냅샷 ====
+    document.getElementById("createSnapshotForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const volumeId = e.target.volumeId.value.trim();
+      if (!volumeId) return showToast("Volume ID를 입력하세요.", "error");
+
+      const { ok, data, status } = await jsonFetch(`${API_BASE}/create/snapshot`, {
+        method: "POST",
+        body: JSON.stringify({ volumeId }),
+      });
+      if (ok) {
+        showToast(`스냅샷 생성 요청 완료: ${data.snapshotId ?? ""}`, "success");
+        fetchSnapshots();
+        e.target.reset();
+      } else {
+        console.error("create snapshot error:", status, data);
+        showToast("스냅샷 생성 실패", "error");
+      }
+    });
+
+    document.getElementById("deleteSnapshotForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const snapshotId = e.target.snapshotId.value.trim();
+      if (!snapshotId) return showToast("Snapshot ID를 입력하세요.", "error");
+
+      const { ok, data, status } = await jsonFetch(`${API_BASE}/delete/snapshot`, {
+        method: "POST",
+        body: JSON.stringify({ snapshotId }),
+      });
+      if (ok) {
+        showToast(`스냅샷 삭제 요청 완료: ${snapshotId}`, "success");
+        fetchSnapshots();
+        e.target.reset();
+      } else {
+        console.error("delete snapshot error:", status, data);
+        showToast("스냅샷 삭제 실패", "error");
+      }
+    });
+
+    // ==== 관리: 정책 ====
+    document.getElementById("createPolicyForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const name = e.target.name.value.trim();
+      const retentionDays = Number(e.target.retentionDays.value);
+      if (!name || !retentionDays) return showToast("이름/보존일을 입력하세요.", "error");
+
+      const { ok, data, status } = await jsonFetch(`${API_BASE}/create/policy`, {
+        method: "POST",
+        body: JSON.stringify({ name, retentionDays }),
+      });
+      if (ok) {
+        showToast(`정책 생성 완료: ${data.policy_id ?? name}`, "success");
+        fetchPolicies();
+        e.target.reset();
+      } else {
+        console.error("create policy error:", status, data);
+        showToast("정책 생성 실패", "error");
+      }
+    });
+
+    document.getElementById("updatePolicyForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const policy_id = e.target.policy_id.value.trim();
+      const name = e.target.name.value.trim();
+      const retentionDaysRaw = e.target.retentionDays.value;
+      const body = { policy_id };
+      if (name) body.name = name;
+      if (retentionDaysRaw) body.retentionDays = Number(retentionDaysRaw);
+
+      if (!policy_id) return showToast("Policy ID는 필수입니다.", "error");
+
+      const { ok, data, status } = await jsonFetch(`${API_BASE}/update/policy`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (ok) {
+        showToast(`정책 수정 완료: ${policy_id}`, "success");
+        fetchPolicies();
+        e.target.reset();
+      } else {
+        console.error("update policy error:", status, data);
+        showToast("정책 수정 실패", "error");
+      }
+    });
+
+    // ==== 이벤트/초기 로드 ====
+    document.getElementById("reloadBtn").addEventListener("click", () => {
+      fetchSnapshots();
+      fetchPolicies();
+    });
+    document.getElementById("reloadSnapshots").addEventListener("click", fetchSnapshots);
+    document.getElementById("filterInput").addEventListener("input", fetchSnapshots);
+
+    window.addEventListener("DOMContentLoaded", () => {
+      fetchSnapshots();
+      fetchPolicies();
+      setInterval(() => {
+        fetchSnapshots();
+        fetchPolicies();
+      }, 300000); // 5분
+    });
+  </script>
+</body>
+</html>
